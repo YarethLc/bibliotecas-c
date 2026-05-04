@@ -1,80 +1,98 @@
-/* usuarios.c */
+
+#include "sesion.h"
 #include "usuarios.h"
 #include <stdio.h>
 #include <string.h>
+#include <stddef.h>
+
+#define MAX_INTENTOS 3
 
 /* -------------------------------------------------------
- * usuarios_registrar
- * Agrega un nuevo usuario al archivo binario.
- * Retorna  0 si se guardó correctamente.
- * Retorna -1 si hubo error al abrir el archivo.
+ * sesion_hash_simple
+ * Hash muy sencillo (djb2) que convierte cualquier cadena
+ * en una representación hexadecimal.
+ * Retorna bufferHex (para poder usarla en expresiones).
  * ------------------------------------------------------- */
-int usuarios_registrar(const char *rutaArchivo, const Usuario *usuario) {
-    FILE *f = fopen(rutaArchivo, "ab");
-    if (!f) return -1;
+const char *sesion_hash_simple(const char *entrada,
+                               char       *bufferHex,
+                               size_t      capacidad) {
+    unsigned long hash = 5381;
+    int c;
+    const char *p = entrada;
 
-    fwrite(usuario, sizeof(Usuario), 1, f);
-    fclose(f);
-    return 0;
-}
-
-/* -------------------------------------------------------
- * usuarios_existe_correo
- * Recorre el archivo buscando si ya existe ese correo.
- * Retorna  1 si existe.
- * Retorna  0 si no existe.
- * Retorna -1 si hubo error al abrir el archivo.
- * ------------------------------------------------------- */
-int usuarios_existe_correo(const char *rutaArchivo, const char *correo) {
-    FILE *f = fopen(rutaArchivo, "rb");
-    if (!f) return 0;   /* si no existe el archivo aún, nadie está registrado */
-
-    Usuario temp;
-    while (fread(&temp, sizeof(Usuario), 1, f) == 1) {
-        if (strcmp(temp.correo, correo) == 0) {
-            fclose(f);
-            return 1;
-        }
+    while ((c = (unsigned char)*p++) != 0) {
+        hash = ((hash << 5) + hash) + c;   /* hash * 33 + c */
     }
-    fclose(f);
-    return 0;
+
+    snprintf(bufferHex, capacidad, "%016lx", hash);
+    return bufferHex;
 }
 
 /* -------------------------------------------------------
- * usuarios_validar_datos
- * Valida que los campos del usuario no estén vacíos.
- * Retorna  1 si los datos son válidos.
- * Retorna  0 si algún campo está vacío.
+ * sesion_iniciar
+ * Deja la sesión en estado "sin autenticar".
  * ------------------------------------------------------- */
-int usuarios_validar_datos(const Usuario *usuario) {
-    if (strlen(usuario->nombre)     == 0) return 0;
-    if (strlen(usuario->correo)     == 0) return 0;
-    if (strlen(usuario->clave_hash) == 0) return 0;
+void sesion_iniciar(Sesion *sesion) {
+    sesion->activa           = 0;
+    sesion->intentos_fallidos = 0;
+    sesion->correo[0]        = '\0';
+}
+
+/* -------------------------------------------------------
+ * sesion_login
+ * Intenta autenticar al usuario.
+ *   Retorna  1  → login exitoso.
+ *   Retorna  0  → credenciales incorrectas.
+ *   Retorna -1  → usuario no encontrado en el archivo.
+ *   Retorna -2  → demasiados intentos fallidos (bloqueado).
+ * ------------------------------------------------------- */
+int sesion_login(Sesion     *sesion,
+                 const char *rutaUsuarios,
+                 const char *correo,
+                 const char *clavePlano) {
+
+    /* Bloqueo por intentos */
+    if (sesion->intentos_fallidos >= MAX_INTENTOS) {
+        printf("Cuenta bloqueada por demasiados intentos fallidos.\n");
+        return -2;
+    }
+
+    /* Buscar usuario */
+    Usuario encontrado;
+    int resultado = usuarios_cargar_por_correo(rutaUsuarios, correo, &encontrado);
+    if (resultado != 1) {
+        sesion->intentos_fallidos++;
+        return -1;
+    }
+
+    /* Hashear la clave ingresada y comparar */
+    char hashIngresado[USUARIOS_MAX_CAMPO];
+    sesion_hash_simple(clavePlano, hashIngresado, sizeof(hashIngresado));
+
+    if (strcmp(hashIngresado, encontrado.clave_hash) != 0) {
+        sesion->intentos_fallidos++;
+        printf("Contraseña incorrecta. Intento %d de %d.\n",
+               sesion->intentos_fallidos, MAX_INTENTOS);
+        return 0;
+    }
+
+    /* Login exitoso */
+    sesion->activa            = 1;
+    sesion->intentos_fallidos = 0;
+    strncpy(sesion->correo, correo, USUARIOS_MAX_CAMPO - 1);
+    sesion->correo[USUARIOS_MAX_CAMPO - 1] = '\0';
+
+    printf("Sesión iniciada: %s\n", sesion->correo);
     return 1;
 }
 
 /* -------------------------------------------------------
- * usuarios_cargar_por_correo
- * Busca en el archivo el usuario con ese correo y lo
- * copia en *salida.
- * Retorna  1 si lo encontró.
- * Retorna  0 si no lo encontró.
- * Retorna -1 si hubo error al abrir el archivo.
+ * sesion_logout
+ * Cierra la sesión activa.
  * ------------------------------------------------------- */
-int usuarios_cargar_por_correo(const char *rutaArchivo,
-                               const char *correo,
-                               Usuario    *salida) {
-    FILE *f = fopen(rutaArchivo, "rb");
-    if (!f) return -1;
-
-    Usuario temp;
-    while (fread(&temp, sizeof(Usuario), 1, f) == 1) {
-        if (strcmp(temp.correo, correo) == 0) {
-            *salida = temp;
-            fclose(f);
-            return 1;
-        }
-    }
-    fclose(f);
-    return 0;
+void sesion_logout(Sesion *sesion) {
+    sesion->activa            = 0;
+    sesion->intentos_fallidos = 0;
+    sesion->correo[0]         = '\0';
+    printf("Sesión cerrada.\n");
 }
